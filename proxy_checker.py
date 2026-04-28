@@ -138,17 +138,14 @@ def process_proxy(ip, port):
 @app.get("/check")
 def check_proxy_url_endpoint(
     request: Request,
-    ip: str = Query(..., description="Alamat IP proxy dengan format IP:PORT")
+    ip: str = Query(..., description="Alamat IP proxy (Format: IP, IP:PORT, IP=PORT, IP-PORT)")
 ):
-    if ":" not in ip:
-        return JSONResponse(
-            status_code=400,
-            content={
-                "error": "Parameter 'ip' harus dalam format IP:PORT."
-            },
-        )
+    # Support separators: ':', '=', '-'
+    # Regex to split by common separators or just take the IP
+    parts = re.split(r'[:=-]', ip, 1)
 
-    ip_address, port_str = ip.split(":", 1)
+    ip_address = parts[0]
+    port_str = parts[1] if len(parts) > 1 else "443"
 
     try:
         port_number = int(port_str)
