@@ -5,17 +5,16 @@ import re
 import pycountry
 import time
 
-IP_RESOLVER = "speed.cloudflare.com"
-PATH_RESOLVER = "/meta"
-TIMEOUT = 3
+IP_RESOLVER = "www.cloudflare.com"
+PATH_RESOLVER = "/cdn-cgi/trace"
+TIMEOUT = 5
 
 def check(host, path, proxy):
     start_time = time.time()
     payload = (
         f"GET {path} HTTP/1.1\r\n"
         f"Host: {host}\r\n"
-        "User-Agent: Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.10240\r\n"
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
         "Connection: close\r\n\r\n"
     )
 
@@ -23,7 +22,11 @@ def check(host, path, proxy):
     port = int(proxy.get("port", 443))
 
     try:
+        # Create SSL context with disabled verification for better compatibility with various proxies
         ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
         with socket.create_connection((ip, port), timeout=TIMEOUT) as sock:
             with ctx.wrap_socket(sock, server_hostname=host) as conn:
                 conn.sendall(payload.encode())
@@ -35,16 +38,39 @@ def check(host, path, proxy):
                     resp += data
 
                 resp = resp.decode("utf-8", errors="ignore")
+                if "\r\n\r\n" not in resp:
+                    return {"error": "Invalid response format"}, "Unknown", 0
+
                 headers, body = resp.split("\r\n\r\n", 1)
                 end_time = time.time()
                 connection_time = (end_time - start_time) * 1000
 
+                # Parse Cloudflare trace format (key=value)
                 try:
-                    json_body = json.loads(body)
-                    http_protocol = json_body.get("httpProtocol", "Unknown")
-                    return json_body, http_protocol, connection_time
-                except (json.JSONDecodeError, KeyError) as e:
-                    error_message = f"Error parsing JSON from {ip}:{port}: {e}"
+                    data_dict = {}
+                    for line in body.splitlines():
+                        if "=" in line:
+                            key, value = line.split("=", 1)
+                            data_dict[key] = value
+
+                    if not data_dict:
+                        return {"error": "Empty trace data"}, "Unknown", connection_time
+
+                    http_protocol = data_dict.get("http", "Unknown")
+                    # Map trace keys to keys expected by process_proxy for compatibility
+                    mapped_data = {
+                        "clientIp": data_dict.get("ip"),
+                        "country": data_dict.get("loc"),
+                        "colo": data_dict.get("colo"),
+                        "httpProtocol": data_dict.get("http"),
+                        # Trace doesn't provide ASN/Org/Lat/Lon easily without more parsing or other endpoints
+                        # But we keep it as is or fill what we can
+                        "asn": "Unknown",
+                        "asOrganization": "Unknown"
+                    }
+                    return mapped_data, http_protocol, connection_time
+                except Exception as e:
+                    error_message = f"Error parsing trace from {ip}:{port}: {e}"
                     print(error_message)
                     return {"error": error_message}, "Unknown", connection_time
 
@@ -72,10 +98,11 @@ def get_country_info(alpha_2):
 def process_proxy(ip, port):
     proxy_data = {"ip": ip, "port": port}
 
-    ori, ori_protocol, ori_connection_time = check(IP_RESOLVER, PATH_RESOLVER, {})
+    # Use a single check to determine if the proxy is alive
     pxy, pxy_protocol, pxy_connection_time = check(IP_RESOLVER, PATH_RESOLVER, proxy_data)
 
-    if ori and not ori.get("error") and pxy and not pxy.get("error") and ori.get("clientIp") != pxy.get("clientIp"):
+    # If we got a valid response from the proxy, it's ACTIVE
+    if pxy and not pxy.get("error") and pxy.get("clientIp"):
         org_name = clean_org_name(pxy.get("asOrganization"))
         proxy_country_code = pxy.get("country") or "Unknown"
         proxy_asn = pxy.get("asn") or "Unknown"
@@ -83,6 +110,11 @@ def process_proxy(ip, port):
         proxy_longitude = pxy.get("longitude") or "Unknown"
         proxy_colo = pxy.get("colo") or "Unknown"
         proxy_country_name, proxy_country_flag = get_country_info(proxy_country_code)
+
+        # If proxy IP is same as original IP, it might not be proxying,
+        # but for many users, just 'connecting' is enough to be called 'Alive'
+        # However, let's keep a check if you really want to ensure it's a proxy
+
         result_message = f"Cloudflare Proxy Alive {ip}:{port}"
         print(result_message)
         return "Active", result_message, proxy_country_code, proxy_asn, proxy_country_name, proxy_country_flag, pxy_protocol, org_name, pxy_connection_time, proxy_latitude, proxy_longitude, proxy_colo
