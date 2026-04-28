@@ -6,25 +6,28 @@ import json
 import re
 import pycountry
 import time
-import http.client
+import csv
+import io
 from concurrent.futures import ThreadPoolExecutor
 
 # Constants
-IP_RESOLVER = "www.cloudflare.com"
-PATH_RESOLVER = "/cdn-cgi/trace"
-TIMEOUT = 5
+IP_RESOLVER = "speed.cloudflare.com"
+PATH_RESOLVER = "/meta"
+TIMEOUT = 7
 MAX_BATCH_SIZE = 10
-SPEED_TEST_URL = "http://www.google.com/gen_204" # Lightweight endpoint for connectivity/speed
 
 app = FastAPI()
 
 # Helper Functions
 def check(host, path, proxy):
     start_time = time.time()
+    # Headers to simulate browser request and get JSON response from cloudflare /meta
     payload = (
         f"GET {path} HTTP/1.1\r\n"
         f"Host: {host}\r\n"
         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36\r\n"
+        "Accept: application/json\r\n"
+        "Referer: https://speed.cloudflare.com/\r\n"
         "Connection: close\r\n\r\n"
     )
 
@@ -55,26 +58,10 @@ def check(host, path, proxy):
                 connection_time = (end_time - start_time) * 1000
 
                 try:
-                    data_dict = {}
-                    for line in body.splitlines():
-                        if "=" in line:
-                            key, value = line.split("=", 1)
-                            data_dict[key] = value
-
-                    if not data_dict:
-                        return {"error": "Empty trace data"}, "Unknown", connection_time
-
-                    http_protocol = data_dict.get("http", "Unknown")
-                    mapped_data = {
-                        "clientIp": data_dict.get("ip"),
-                        "country": data_dict.get("loc"),
-                        "colo": data_dict.get("colo"),
-                        "httpProtocol": data_dict.get("http"),
-                        "tls": data_dict.get("tls", "Unknown")
-                    }
-                    return mapped_data, http_protocol, connection_time
+                    json_body = json.loads(body)
+                    return json_body, json_body.get("httpProtocol", "Unknown"), connection_time
                 except Exception as e:
-                    return {"error": f"Parse error: {e}"}, "Unknown", connection_time
+                    return {"error": f"JSON Parse error: {e}"}, "Unknown", connection_time
 
     except Exception as e:
         return {"error": str(e)}, "Unknown", 0
@@ -92,21 +79,6 @@ def get_country_info(alpha_2):
     except:
         return "Unknown", None
 
-def get_ip_metadata(ip):
-    try:
-        conn = http.client.HTTPConnection("ip-api.com", timeout=5)
-        conn.request("GET", f"/json/{ip}")
-        response = conn.getresponse()
-        rl = response.getheader('X-Rl', 'Unknown')
-        if response.status == 200:
-            data = json.loads(response.read().decode())
-            if data.get("status") == "success":
-                data['remaining_requests'] = rl
-                return data
-    except:
-        pass
-    return {'remaining_requests': 'Unknown'}
-
 def measure_speed(ip, port):
     """Simple speed test by measuring time to receive headers from a known small endpoint"""
     start_time = time.time()
@@ -116,11 +88,11 @@ def measure_speed(ip, port):
         "Connection: close\r\n\r\n"
     )
     try:
-        # Use simple socket for speed test to avoid SSL overhead on different hosts
         with socket.create_connection((ip, port), timeout=TIMEOUT) as sock:
             sock.sendall(payload.encode())
             sock.recv(1024)
             end_time = time.time()
+            # This is a rough estimation of throughput based on latency of a tiny request
             return f"{round(1000 / (end_time - start_time), 2)} KB/s"
     except:
         return "N/A"
@@ -138,28 +110,31 @@ def process_single_proxy(raw_ip_input):
     pxy, pxy_protocol, pxy_connection_time = check(IP_RESOLVER, PATH_RESOLVER, {"ip": ip_address, "port": port_number})
 
     if pxy and not pxy.get("error") and pxy.get("clientIp"):
-        detected_ip = pxy.get("clientIp")
-        metadata = get_ip_metadata(detected_ip)
-
         speed = measure_speed(ip_address, port_number)
-        proxy_country_code = metadata.get("countryCode") or pxy.get("country") or "Unknown"
+        proxy_country_code = pxy.get("country") or "Unknown"
         proxy_country_name, proxy_country_flag = get_country_info(proxy_country_code)
+
+        # Cloudflare provides colo as a dictionary or string
+        colo_data = pxy.get("colo")
+        if isinstance(colo_data, dict):
+            colo_name = colo_data.get("iata") or "Unknown"
+        else:
+            colo_name = str(colo_data) if colo_data else "Unknown"
 
         return {
             "ip": ip_address,
             "port": port_number,
             "status": "ACTIVE",
-            "isp": clean_org_name(metadata.get("isp") or "Unknown"),
+            "isp": clean_org_name(pxy.get("asOrganization") or "Unknown"),
             "countryCode": proxy_country_code,
             "country": f"{proxy_country_name} {proxy_country_flag or ''}".strip(),
-            "asn": metadata.get("as") or "Unknown",
-            "colo": pxy.get("colo") or "Unknown",
+            "asn": f"AS{pxy.get('asn')}" if pxy.get('asn') else "Unknown",
+            "colo": colo_name,
             "httpProtocol": pxy_protocol,
             "delay": f"{round(pxy_connection_time)} ms",
             "speed_est": speed,
-            "latitude": str(metadata.get("lat", "Unknown")),
-            "longitude": str(metadata.get("lon", "Unknown")),
-            "remaining_limit": metadata.get("remaining_requests", "Unknown")
+            "latitude": str(pxy.get("latitude", "Unknown")),
+            "longitude": str(pxy.get("longitude", "Unknown")),
         }
     else:
         return {
@@ -184,17 +159,17 @@ def check_proxy_endpoint(
 
     if format == "csv":
         if not results: return PlainTextResponse("")
-        # Use all possible headers from all results to ensure no data is lost
         all_headers = []
         for r in results:
             for key in r.keys():
                 if key not in all_headers:
                     all_headers.append(key)
 
-        output = ",".join(all_headers) + "\n"
-        for r in results:
-            output += ",".join(str(r.get(h, "")) for h in all_headers) + "\n"
-        return PlainTextResponse(output)
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=all_headers)
+        writer.writeheader()
+        writer.writerows(results)
+        return PlainTextResponse(output.getvalue())
 
     elif format == "text":
         output = ""
@@ -202,5 +177,4 @@ def check_proxy_endpoint(
             output += f"[{r.get('status')}] {r.get('ip')}:{r.get('port')} - {r.get('country', '')} ({r.get('isp', '')})\n"
         return PlainTextResponse(output)
 
-    # Default to JSON
     return results[0] if len(results) == 1 else results
