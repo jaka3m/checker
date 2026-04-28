@@ -1,3 +1,5 @@
+from fastapi import FastAPI, Request, Query, HTTPException
+from fastapi.responses import JSONResponse
 import socket
 import ssl
 import json
@@ -6,10 +8,14 @@ import pycountry
 import time
 import http.client
 
+# Constants
 IP_RESOLVER = "www.cloudflare.com"
 PATH_RESOLVER = "/cdn-cgi/trace"
 TIMEOUT = 5
 
+app = FastAPI()
+
+# Helper Functions
 def check(host, path, proxy):
     start_time = time.time()
     payload = (
@@ -23,7 +29,6 @@ def check(host, path, proxy):
     port = int(proxy.get("port", 443))
 
     try:
-        # Create SSL context with disabled verification for better compatibility with various proxies
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
@@ -46,7 +51,6 @@ def check(host, path, proxy):
                 end_time = time.time()
                 connection_time = (end_time - start_time) * 1000
 
-                # Parse Cloudflare trace format (key=value)
                 try:
                     data_dict = {}
                     for line in body.splitlines():
@@ -58,14 +62,11 @@ def check(host, path, proxy):
                         return {"error": "Empty trace data"}, "Unknown", connection_time
 
                     http_protocol = data_dict.get("http", "Unknown")
-                    # Map trace keys to keys expected by process_proxy for compatibility
                     mapped_data = {
                         "clientIp": data_dict.get("ip"),
                         "country": data_dict.get("loc"),
                         "colo": data_dict.get("colo"),
                         "httpProtocol": data_dict.get("http"),
-                        # Trace doesn't provide ASN/Org/Lat/Lon easily without more parsing or other endpoints
-                        # But we keep it as is or fill what we can
                         "asn": "Unknown",
                         "asOrganization": "Unknown"
                     }
@@ -111,11 +112,8 @@ def get_ip_metadata(ip):
 
 def process_proxy(ip, port):
     proxy_data = {"ip": ip, "port": port}
-
-    # Use a single check to determine if the proxy is alive
     pxy, pxy_protocol, pxy_connection_time = check(IP_RESOLVER, PATH_RESOLVER, proxy_data)
 
-    # If we got a valid response from the proxy, it's ACTIVE
     if pxy and not pxy.get("error") and pxy.get("clientIp"):
         detected_ip = pxy.get("clientIp")
         metadata = get_ip_metadata(detected_ip)
@@ -135,3 +133,55 @@ def process_proxy(ip, port):
         dead_message = f"Cloudflare Proxy Dead: {ip}:{port}"
         print(dead_message)
         return "Dead", dead_message, "Unknown", "Unknown", "Unknown", None, "Unknown", "Unknown", 0, "Unknown", "Unknown", "Unknown"
+
+# Endpoints
+@app.get("/check")
+def check_proxy_url_endpoint(
+    request: Request,
+    ip: str = Query(..., description="Alamat IP proxy dengan format IP:PORT")
+):
+    if ":" not in ip:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "Parameter 'ip' harus dalam format IP:PORT."
+            },
+        )
+
+    ip_address, port_str = ip.split(":", 1)
+
+    try:
+        port_number = int(port_str)
+        status_str, message, country_code, asn, country_name, country_flag, http_protocol, org_name, connection_time, latitude, longitude, colo = process_proxy(ip_address, port_number)
+
+        if status_str == "Active":
+            response_data = {
+                "ip": ip_address,
+                "port": port_number,
+                "status": "ACTIVE",
+                "isp": org_name,
+                "countryCode": country_code,
+                "country": f"{country_name} {country_flag}",
+                "asn": asn,
+                "colo": colo,
+                "httpProtocol": http_protocol,
+                "delay": f"{round(connection_time)} ms",
+                "latitude": latitude,
+                "longitude": longitude,
+            }
+        else:
+            response_data = {
+                "ip": ip_address,
+                "port": port_number,
+                "status": "DEAD",
+                "asn": asn,
+            }
+
+        return response_data
+
+    except ValueError:
+        return JSONResponse(status_code=400, content={"error": "Port harus berupa angka."})
+    except Exception as e:
+        error_message = f"Terjadi kesalahan server saat memproses proxy {ip}: {e}"
+        print(error_message)
+        return JSONResponse(status_code=500, content={"error": error_message})

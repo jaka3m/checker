@@ -2,22 +2,14 @@
   "version": 2,
   "builds": [
     {
-      "src": "main.py",
+      "src": "proxy_checker.py",
       "use": "@vercel/python"
     }
   ],
   "routes": [
     {
       "src": "/check(.*)",
-      "dest": "main.py"
-    },
-    {
-      "src": "/",
-      "dest": "main.py"
-    },
-    {
-      "src": "/sub",
-      "dest": "main.py"
+      "dest": "proxy_checker.py"
     }
   ]
 }
