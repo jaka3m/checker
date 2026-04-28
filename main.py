@@ -9,22 +9,22 @@ app = FastAPI()
 env = Environment(loader=FileSystemLoader("templates"))
 
 @app.get("/", response_class=HTMLResponse)
-async def homepage(request: Request):
+def homepage(request: Request):
     template = env.get_template("index.html")
     return template.render()
 
 @app.get("/checker", response_class=HTMLResponse) # Tambahkan endpoint ini
-async def random_ip_page(request: Request):
+def random_ip_page(request: Request):
     template = env.get_template("checker.html")
     return template.render()
 
 @app.get("/sub", response_class=HTMLResponse) # Endpoint baru untuk sub.html
-async def sub_page(request: Request):
+def sub_page(request: Request):
     template = env.get_template("sub.html")
     return template.render()
 
 @app.get("/check")
-async def check_proxy_url_endpoint(
+def check_proxy_url_endpoint(
     request: Request,
     ip: str = Query(..., description="Alamat IP proxy dengan format IP:PORT")
 ):
