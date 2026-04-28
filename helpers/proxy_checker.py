@@ -4,6 +4,7 @@ import json
 import re
 import pycountry
 import time
+import http.client
 
 IP_RESOLVER = "www.cloudflare.com"
 PATH_RESOLVER = "/cdn-cgi/trace"
@@ -95,6 +96,19 @@ def get_country_info(alpha_2):
         print(f"Error getting country info: {e}")
         return "Unknown", None
 
+def get_ip_metadata(ip):
+    try:
+        conn = http.client.HTTPConnection("ip-api.com", timeout=5)
+        conn.request("GET", f"/json/{ip}")
+        response = conn.getresponse()
+        if response.status == 200:
+            data = json.loads(response.read().decode())
+            if data.get("status") == "success":
+                return data
+    except Exception as e:
+        print(f"Error fetching metadata for {ip}: {e}")
+    return {}
+
 def process_proxy(ip, port):
     proxy_data = {"ip": ip, "port": port}
 
@@ -103,17 +117,16 @@ def process_proxy(ip, port):
 
     # If we got a valid response from the proxy, it's ACTIVE
     if pxy and not pxy.get("error") and pxy.get("clientIp"):
-        org_name = clean_org_name(pxy.get("asOrganization"))
-        proxy_country_code = pxy.get("country") or "Unknown"
-        proxy_asn = pxy.get("asn") or "Unknown"
-        proxy_latitude = pxy.get("latitude") or "Unknown"
-        proxy_longitude = pxy.get("longitude") or "Unknown"
+        detected_ip = pxy.get("clientIp")
+        metadata = get_ip_metadata(detected_ip)
+
+        org_name = clean_org_name(metadata.get("isp") or pxy.get("asOrganization"))
+        proxy_country_code = metadata.get("countryCode") or pxy.get("country") or "Unknown"
+        proxy_asn = metadata.get("as") or pxy.get("asn") or "Unknown"
+        proxy_latitude = str(metadata.get("lat")) if metadata.get("lat") is not None else "Unknown"
+        proxy_longitude = str(metadata.get("lon")) if metadata.get("lon") is not None else "Unknown"
         proxy_colo = pxy.get("colo") or "Unknown"
         proxy_country_name, proxy_country_flag = get_country_info(proxy_country_code)
-
-        # If proxy IP is same as original IP, it might not be proxying,
-        # but for many users, just 'connecting' is enough to be called 'Alive'
-        # However, let's keep a check if you really want to ensure it's a proxy
 
         result_message = f"Cloudflare Proxy Alive {ip}:{port}"
         print(result_message)
